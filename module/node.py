@@ -3,6 +3,68 @@ import requests
 import time
 from .logging import logger
 
+
+def _poll_task_result(task_id, api_key, poll_interval, max_wait_time):
+    """轮询任务结果"""
+    task_url = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+    headers = {
+        "Authorization": f"Bearer {api_key}" if api_key else ""
+    }
+    
+    start_time = time.time()
+    
+    while True:
+        try:
+            # 检查是否超时
+            if time.time() - start_time > max_wait_time:
+                error_msg = f"任务轮询超时 ({max_wait_time}秒)"
+                logger.info(f"[BailianAPI] {error_msg}")
+                return {"error": error_msg, "task_id": task_id}
+            
+            logger.info(f"[BailianAPI] 轮询任务状态: {task_id}")
+            
+            # 查询任务状态
+            response = requests.get(task_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            result_data = response.json()
+            task_status = result_data.get("output", {}).get("task_status", "")
+            
+            logger.info(f"[BailianAPI] 任务状态: {task_status}")
+            
+            # 任务完成
+            if task_status == "SUCCEEDED":
+                logger.info(f"[BailianAPI] 任务完成成功")
+                return result_data
+            
+            # 任务失败
+            elif task_status == "FAILED":
+                error_code = result_data.get("output", {}).get("code", "unknown")
+                error_message = result_data.get("output", {}).get("message", "任务执行失败")
+                logger.info(f"[BailianAPI] 任务执行失败: {error_code} - {error_message}")
+                return result_data
+            
+            # 继续等待
+            elif task_status in ["PENDING", "RUNNING"]:
+                time.sleep(poll_interval)
+                continue
+            
+            # 未知状态
+            else:
+                logger.info(f"[BailianAPI] 未知任务状态: {task_status}")
+                return result_data
+                
+        except requests.exceptions.RequestException as e:
+            error_msg = f"轮询请求失败: {str(e)}"
+            logger.info(f"[BailianAPI] {error_msg}")
+            return {"error": error_msg, "task_id": task_id}
+            
+        except Exception as e:
+            error_msg = f"轮询过程出错: {str(e)}"
+            logger.info(f"[BailianAPI] {error_msg}")
+            return {"error": error_msg, "task_id": task_id}
+
+
 class BailianAPI:
     @classmethod
     def INPUT_TYPES(s):
@@ -76,7 +138,8 @@ class BailianAPI:
                 
                 # 如果任务是PENDING状态，开始轮询
                 if task_status == "PENDING":
-                    return self._poll_task_result(task_id, api_key, poll_interval, max_wait_time)
+                    task_result = _poll_task_result(task_id, api_key, poll_interval, max_wait_time)
+                    return (json.dumps(task_result, ensure_ascii=False, indent=2),)
                 
             # 直接返回结果（同步模式或已完成的任务）
             return (json.dumps(response_data, ensure_ascii=False, indent=2),)
@@ -95,67 +158,6 @@ class BailianAPI:
             error_msg = f"未知错误: {str(e)}"
             logger.info(f"[BailianAPI] {error_msg}")
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
-
-    def _poll_task_result(self, task_id, api_key, poll_interval, max_wait_time):
-        """轮询任务结果"""
-        task_url = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
-        headers = {
-            "Authorization": f"Bearer {api_key}" if api_key else ""
-        }
-        
-        start_time = time.time()
-        
-        while True:
-            try:
-                # 检查是否超时
-                if time.time() - start_time > max_wait_time:
-                    error_msg = f"任务轮询超时 ({max_wait_time}秒)"
-                    logger.info(f"[BailianAPI] {error_msg}")
-                    return (json.dumps({"error": error_msg, "task_id": task_id}, ensure_ascii=False),)
-                
-                logger.info(f"[BailianAPI] 轮询任务状态: {task_id}")
-                
-                # 查询任务状态
-                response = requests.get(task_url, headers=headers, timeout=10)
-                response.raise_for_status()
-                
-                result_data = response.json()
-                task_status = result_data.get("output", {}).get("task_status", "")
-                
-                logger.info(f"[BailianAPI] 任务状态: {task_status}")
-                
-                # 任务完成
-                if task_status == "SUCCEEDED":
-                    logger.info(f"[BailianAPI] 任务完成成功")
-                    return (json.dumps(result_data, ensure_ascii=False, indent=2),)
-                
-                # 任务失败
-                elif task_status == "FAILED":
-                    error_code = result_data.get("output", {}).get("code", "unknown")
-                    error_message = result_data.get("output", {}).get("message", "任务执行失败")
-                    logger.info(f"[BailianAPI] 任务执行失败: {error_code} - {error_message}")
-                    return (json.dumps(result_data, ensure_ascii=False, indent=2),)
-                
-                # 继续等待
-                elif task_status in ["PENDING", "RUNNING"]:
-                    time.sleep(poll_interval)
-                    continue
-                
-                # 未知状态
-                else:
-                    logger.info(f"[BailianAPI] 未知任务状态: {task_status}")
-                    return (json.dumps(result_data, ensure_ascii=False, indent=2),)
-                    
-            except requests.exceptions.RequestException as e:
-                error_msg = f"轮询请求失败: {str(e)}"
-                logger.info(f"[BailianAPI] {error_msg}")
-                return (json.dumps({"error": error_msg, "task_id": task_id}, ensure_ascii=False),)
-                
-            except Exception as e:
-                error_msg = f"轮询过程出错: {str(e)}"
-                logger.info(f"[BailianAPI] {error_msg}")
-                return (json.dumps({"error": error_msg, "task_id": task_id}, ensure_ascii=False),)
-
 
 class BailianAPISubmit:
     """提交阿里云百炼API任务，返回task_id"""
@@ -376,7 +378,7 @@ class MaletteJSONExtractor:
 
     FUNCTION = "extract"
 
-    OUTPUT_NODE = False
+    OUTPUT_NODE = True
 
     CATEGORY = "Malette"
 
@@ -416,7 +418,13 @@ class MaletteJSONExtractor:
                 result = str(current_data) if current_data is not None else ""
             
             logger.info(f"[JSONExtractor] 成功提取键路径 '{key_path}': {result[:100]}{'...' if len(str(result)) > 100 else ''}")
-            return (result,)
+            formatted_result = None
+            try:
+                formatted_result = json.loads(result) if isinstance(result, str) else result
+            except json.JSONDecodeError:
+                logger.info(f"[JSONExtractor] 格式化结果失败，无法解析JSON，可能不是JSON格式: {result}")
+                formatted_result = result
+            return {"ui": {"json": [formatted_result], "text": [result]}, "result": (formatted_result,)}
             
         except json.JSONDecodeError as e:
             error_msg = f"JSON 解析失败: {str(e)}"
@@ -596,6 +604,124 @@ class MaletteJSONModifier:
         else:
             raise TypeError(f"无法在类型 {type(current)} 上设置键 '{final_key}'")
 
+class VirtualTryOn:
+    """虚拟试穿"""
+    
+    """
+    {
+        "model": "aitryon-plus",
+        "input": {
+            "top_garment_url": "https://help-static-aliyun-doc.aliyuncs.com/assets/img/zh-CN/2389646171/p801332.jpeg",
+            "bottom_garment_url": "",
+            "person_image_url": "https://help-static-aliyun-doc.aliyuncs.com/assets/img/zh-CN/1389646171/p801328.png"
+        },
+        "parameters": {
+            "resolution": -1,
+            "restore_face": true
+        }
+    }
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "top_garment_image": ("STRING",),
+                "bottom_garment_image": ("STRING",),
+                "person_images": ("STRING",),
+                "api_key": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "endpoint": ("STRING", {"default": "https://dashscope.aliyuncs.com/api/v1/services/aigc/image2image/image-synthesis/"}),
+                "model": ("STRING", {"default": "aitryon-plus"}),
+                "parameters": ("STRING", {"default": "{}"}),
+                "async_mode": ("BOOLEAN", {"default": True}),
+                "poll_interval": ("INT", {"default": 3, "min": 1, "max": 30}),
+                "max_wait_time": ("INT", {"default": 300, "min": 30, "max": 1800}),
+            }
+        }
+    
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("response",)
+    
+    FUNCTION = "run"
+    
+    
+    CATEGORY = "Malette"
+    
+    def run(self, top_garment_image, bottom_garment_image, person_images, api_key, endpoint, model, parameters, async_mode=True, poll_interval=3, max_wait_time=300):
+        try:
+            if (not top_garment_image) or (not person_images):
+                raise ValueError("top_garment_image, bottom_garment_image, person_images 不能为空")
+            # 构建请求数据
+            person_images = json.loads(person_images)
+
+            if person_images is None or len(person_images) == 0:
+                raise ValueError("person_images 不能为空")
+
+            # 设置请求头
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}" if api_key else ""
+            }
+            
+            # 如果启用异步模式，添加异步头
+            if async_mode:
+                headers["X-DashScope-Async"] = "enable"
+
+            response_data_list = []
+            
+            for person_image in person_images:
+                request_data = {
+                    "model": model,
+                    "input": {
+                        "top_garment_url": top_garment_image,
+                        "bottom_garment_url": bottom_garment_image if bottom_garment_image is not None and bottom_garment_image.strip() != "" else "",
+                        "person_image_url": person_image,
+                    },
+                }
+                if parameters is not None and parameters.strip() != "":
+                    request_data["parameters"] = parameters if isinstance(parameters, dict) else json.loads(parameters)
+                else:
+                    request_data["parameters"] = {}
+                logger.info(f"[VirtualTryOn] 发送请求到: {endpoint}, 请求数据: {request_data}")
+                response = requests.post(endpoint, headers=headers, json=request_data)
+                if response.status_code != 200:
+                    raise ValueError(f"API 请求失败: {response.status_code} {response.text}")
+                response_data = response.json()
+                logger.info(f"[VirtualTryOn] 请求成功: {response_data}")
+                # 如果是异步模式且有task_id，需要轮询结果
+                if async_mode and "output" in response_data and "task_id" in response_data["output"]:
+                    task_id = response_data["output"]["task_id"]
+                    task_status = response_data["output"].get("task_status", "")
+                    
+                    logger.info(f"[BailianAPI] 获取到任务ID: {task_id}, 状态: {task_status}")
+                    
+                    # 如果任务是PENDING状态，开始轮询
+                    if task_status == "PENDING":
+                        response_data = _poll_task_result(task_id, api_key, poll_interval, max_wait_time)
+                        response_data_list.append(response_data)
+                else:
+                    # 同步模式
+                    response_data_list.append(response_data)
+                
+            return (json.dumps(response_data_list, ensure_ascii=False),)
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API 请求失败: {str(e)}"
+            logger.info(f"[BailianAPI] {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"JSON 解析失败: {str(e)}"
+            logger.info(f"[BailianAPI] {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+            
+        except Exception as e:
+            error_msg = f"未知错误: {str(e)}"
+            logger.info(f"[BailianAPI] {error_msg}")
+            return (json.dumps({"error": error_msg}, ensure_ascii=False),)
+    
 
 # 节点映射
 NODE_CLASS_MAPPINGS = {
@@ -603,7 +729,8 @@ NODE_CLASS_MAPPINGS = {
     "BailianAPISubmit": BailianAPISubmit,
     "BailianAPIPoll": BailianAPIPoll,
     "MaletteJSONExtractor": MaletteJSONExtractor,
-    "MaletteJSONModifier": MaletteJSONModifier
+    "MaletteJSONModifier": MaletteJSONModifier,
+    "MaletteVirtualTryOn": VirtualTryOn
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -611,5 +738,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BailianAPISubmit": "AliCloud Bailian API Submit",
     "BailianAPIPoll": "AliCloud Bailian API Poll",
     "MaletteJSONExtractor": "Malette JSON Extractor",
-    "MaletteJSONModifier": "Malette JSON Modifier"
+    "MaletteJSONModifier": "Malette JSON Modifier",
+    "MaletteVirtualTryOn": "Malette Virtual TryOn"
 }
