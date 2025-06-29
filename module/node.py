@@ -1,6 +1,8 @@
 import json
 import requests
 import time
+import asyncio
+import aiohttp
 from .logging import logger
 
 
@@ -64,6 +66,203 @@ def _poll_task_result(task_id, api_key, poll_interval, max_wait_time):
             logger.info(f"[BailianAPI] {error_msg}")
             return {"error": error_msg, "task_id": task_id}
 
+async def _async_poll_task_result(session, task_id, api_key, poll_interval, max_wait_time):
+    """异步轮询任务结果"""
+    task_url = f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+    headers = {
+        "Authorization": f"Bearer {api_key}" if api_key else ""
+    }
+    
+    start_time = time.time()
+    
+    while True:
+        try:
+            # 检查是否超时
+            if time.time() - start_time > max_wait_time:
+                error_msg = f"任务轮询超时 ({max_wait_time}秒)"
+                logger.info(f"[BailianAPI] {error_msg}")
+                return {"error": error_msg, "task_id": task_id}
+            
+            logger.info(f"[BailianAPI] 轮询任务状态: {task_id}")
+            
+            # 查询任务状态
+            async with session.get(task_url, headers=headers) as response:
+                response.raise_for_status()
+                result_data = await response.json()
+            
+            task_status = result_data.get("output", {}).get("task_status", "")
+            logger.info(f"[BailianAPI] 任务状态: {task_status}")
+            
+            # 任务完成
+            if task_status == "SUCCEEDED":
+                logger.info(f"[BailianAPI] 任务完成成功")
+                return result_data
+            
+            # 任务失败
+            elif task_status == "FAILED":
+                error_code = result_data.get("output", {}).get("code", "unknown")
+                error_message = result_data.get("output", {}).get("message", "任务执行失败")
+                logger.info(f"[BailianAPI] 任务执行失败: {error_code} - {error_message}")
+                return result_data
+            
+            # 继续等待
+            elif task_status in ["PENDING", "RUNNING"]:
+                await asyncio.sleep(poll_interval)
+                continue
+            
+            # 未知状态
+            else:
+                logger.info(f"[BailianAPI] 未知任务状态: {task_status}")
+                return result_data
+                
+        except Exception as e:
+            error_msg = f"轮询过程出错: {str(e)}"
+            logger.info(f"[BailianAPI] {error_msg}")
+            return {"error": error_msg, "task_id": task_id}
+
+async def _async_create_and_poll_refiner_task(session, endpoint, gender, input, result_image_url, api_key, poll_interval, max_wait_time):
+    """异步创建和轮询refiner任务"""
+    request_data = {
+        "model": "aitryon-refiner",
+        "input": {
+            "coarse_image_url": result_image_url,
+            **input
+        },
+        "parameters": {
+            "gender": gender,
+        }
+    }
+    logger.info(f"[VirtualTryOn Refiner] 发送请求到: {endpoint}, 请求数据: {request_data}")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}" if api_key else "",
+        "X-DashScope-Async": "enable"
+    }
+    
+    async with session.post(endpoint, headers=headers, json=request_data) as response:
+        if response.status != 200:
+            response_text = await response.text()
+            raise ValueError(f"API 请求失败: {response.status} {response_text}")
+        response_data = await response.json()
+    
+    logger.info(f"[VirtualTryOn] 请求成功: {response_data}")
+    
+    # 如果是异步模式且有task_id，需要轮询结果
+    if "output" in response_data and "task_id" in response_data["output"]:
+        task_id = response_data["output"]["task_id"]
+        task_status = response_data["output"].get("task_status", "")
+        
+        logger.info(f"[BailianAPI] 获取到任务ID: {task_id}, 状态: {task_status}")
+        
+        # 如果任务是PENDING状态，开始轮询
+        if task_status == "PENDING":
+            response_data = await _async_poll_task_result(session, task_id, api_key, poll_interval, max_wait_time)
+            return response_data
+        else:
+            return response_data
+    else:
+        return response_data
+
+async def _async_process_single_person(session, person_image, top_garment_image, bottom_garment_image, model, parameters, endpoint, headers, async_mode, enable_refiner, gender, api_key, poll_interval, max_wait_time):
+    """异步处理单个人物图像"""
+    try:
+        input = {
+            "top_garment_url": top_garment_image,
+            "bottom_garment_url": bottom_garment_image if bottom_garment_image is not None and bottom_garment_image.strip() != "" else "",
+            "person_image_url": person_image,
+        }
+        request_data = {
+            "model": model,
+            "input": input,
+        }
+        if parameters is not None and parameters.strip() != "":
+            request_data["parameters"] = parameters if isinstance(parameters, dict) else json.loads(parameters)
+        else:
+            request_data["parameters"] = {}
+        
+        logger.info(f"[VirtualTryOn] 发送请求到: {endpoint}, 请求数据: {request_data}")
+        
+        async with session.post(endpoint, headers=headers, json=request_data) as response:
+            if response.status != 200:
+                response_text = await response.text()
+                raise ValueError(f"API 请求失败: {response.status} {response_text}")
+            response_data = await response.json()
+        
+        logger.info(f"[VirtualTryOn] 请求成功: {response_data}")
+        
+        # 如果是异步模式且有task_id，需要轮询结果
+        if async_mode and "output" in response_data and "task_id" in response_data["output"]:
+            task_id = response_data["output"]["task_id"]
+            task_status = response_data["output"].get("task_status", "")
+            
+            logger.info(f"[BailianAPI] 获取到任务ID: {task_id}, 状态: {task_status}")
+            
+            # 如果任务是PENDING状态，开始轮询
+            if task_status == "PENDING":
+                response_data = await _async_poll_task_result(session, task_id, api_key, poll_interval, max_wait_time)
+                if enable_refiner:
+                    try:
+                        response_data = await _async_create_and_poll_refiner_task(session, endpoint, gender, input, response_data["output"]["image_url"], api_key, poll_interval, max_wait_time)
+                    except Exception as e:
+                        error_msg = f"处理refiner任务失败: {str(e)}"
+                        logger.info(f"[VirtualTryOn] {error_msg}")
+                        
+                return response_data
+        else:
+            # 同步模式
+            if enable_refiner:
+                try:
+                    response_data = await _async_create_and_poll_refiner_task(session, endpoint, gender, input, response_data["output"]["image_url"], api_key, poll_interval, max_wait_time)
+                except Exception as e:
+                    error_msg = f"处理refiner任务失败: {str(e)}"
+                    logger.info(f"[VirtualTryOn] {error_msg}")
+            return response_data
+            
+    except Exception as e:
+        error_msg = f"处理人物图像失败: {str(e)}"
+        logger.info(f"[VirtualTryOn] {error_msg}")
+        return {"error": error_msg, "person_image": person_image}
+
+def create_and_poll_refiner_task(endpoint, gender, input, result_image_url, api_key, poll_interval, max_wait_time):
+    request_data = {
+        "model": "aitryon-refiner",
+        "input": {
+            "coarse_image_url": result_image_url,
+            **input
+        },
+        "parameters": {
+            "gender": gender,
+        }
+    }
+    logger.info(f"[VirtualTryOn Refiner] 发送请求到: {endpoint}, 请求数据: {request_data}")
+    # 设置请求头
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}" if api_key else "",
+        "X-DashScope-Async": "enable"
+    }
+    
+    response = requests.post(endpoint, headers=headers, json=request_data)
+    if response.status_code != 200:
+        raise ValueError(f"API 请求失败: {response.status_code} {response.text}")
+    response_data = response.json()
+    logger.info(f"[VirtualTryOn] 请求成功: {response_data}")
+    # 如果是异步模式且有task_id，需要轮询结果
+    if "output" in response_data and "task_id" in response_data["output"]:
+        task_id = response_data["output"]["task_id"]
+        task_status = response_data["output"].get("task_status", "")
+        
+        logger.info(f"[BailianAPI] 获取到任务ID: {task_id}, 状态: {task_status}")
+        
+        # 如果任务是PENDING状态，开始轮询
+        if task_status == "PENDING":
+            response_data = _poll_task_result(task_id, api_key, poll_interval, max_wait_time)
+            return response_data
+        else:
+            return response_data
+    else:
+        return response_data
 
 class BailianAPI:
     @classmethod
@@ -636,6 +835,8 @@ class VirtualTryOn:
                 "model": ("STRING", {"default": "aitryon-plus"}),
                 "parameters": ("STRING", {"default": "{}"}),
                 "async_mode": ("BOOLEAN", {"default": True}),
+                "enable_refiner": ("BOOLEAN", {"default": False}),
+                "gender": ("STRING", {"default": "male", "choices": ["male", "female"]}),
                 "poll_interval": ("INT", {"default": 3, "min": 1, "max": 30}),
                 "max_wait_time": ("INT", {"default": 300, "min": 30, "max": 1800}),
             }
@@ -649,7 +850,37 @@ class VirtualTryOn:
     
     CATEGORY = "Malette"
     
-    def run(self, top_garment_image, bottom_garment_image, person_images, api_key, endpoint, model, parameters, async_mode=True, poll_interval=3, max_wait_time=300):
+    async def _async_process_all_persons(self, person_images, top_garment_image, bottom_garment_image, model, parameters, endpoint, headers, async_mode, enable_refiner, gender, api_key, poll_interval, max_wait_time):
+        """异步并行处理所有人物图像"""
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+            # 创建所有异步任务
+            tasks = [
+                _async_process_single_person(
+                    session, person_image, top_garment_image, bottom_garment_image,
+                    model, parameters, endpoint, headers, async_mode, enable_refiner,
+                    gender, api_key, poll_interval, max_wait_time
+                )
+                for person_image in person_images
+            ]
+            
+            # 并行执行所有任务
+            logger.info(f"[VirtualTryOn] 开始并行处理 {len(tasks)} 个人物图像")
+            response_data_list = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 处理异常结果
+            processed_results = []
+            for i, result in enumerate(response_data_list):
+                if isinstance(result, Exception):
+                    error_msg = f"处理第 {i+1} 个人物图像时发生异常: {str(result)}"
+                    logger.info(f"[VirtualTryOn] {error_msg}")
+                    processed_results.append({"error": error_msg, "person_image": person_images[i]})
+                else:
+                    processed_results.append(result)
+            
+            logger.info(f"[VirtualTryOn] 并行处理完成，成功处理 {len([r for r in processed_results if 'error' not in r])} 个，失败 {len([r for r in processed_results if 'error' in r])} 个")
+            return processed_results
+    
+    def run(self, top_garment_image, bottom_garment_image, person_images, api_key, endpoint, model, parameters, async_mode=True, enable_refiner=False, gender="male", poll_interval=3, max_wait_time=300):
         try:
             if (not top_garment_image) or (not person_images):
                 raise ValueError("top_garment_image, bottom_garment_image, person_images 不能为空")
@@ -669,41 +900,12 @@ class VirtualTryOn:
             if async_mode:
                 headers["X-DashScope-Async"] = "enable"
 
-            response_data_list = []
-            
-            for person_image in person_images:
-                request_data = {
-                    "model": model,
-                    "input": {
-                        "top_garment_url": top_garment_image,
-                        "bottom_garment_url": bottom_garment_image if bottom_garment_image is not None and bottom_garment_image.strip() != "" else "",
-                        "person_image_url": person_image,
-                    },
-                }
-                if parameters is not None and parameters.strip() != "":
-                    request_data["parameters"] = parameters if isinstance(parameters, dict) else json.loads(parameters)
-                else:
-                    request_data["parameters"] = {}
-                logger.info(f"[VirtualTryOn] 发送请求到: {endpoint}, 请求数据: {request_data}")
-                response = requests.post(endpoint, headers=headers, json=request_data)
-                if response.status_code != 200:
-                    raise ValueError(f"API 请求失败: {response.status_code} {response.text}")
-                response_data = response.json()
-                logger.info(f"[VirtualTryOn] 请求成功: {response_data}")
-                # 如果是异步模式且有task_id，需要轮询结果
-                if async_mode and "output" in response_data and "task_id" in response_data["output"]:
-                    task_id = response_data["output"]["task_id"]
-                    task_status = response_data["output"].get("task_status", "")
-                    
-                    logger.info(f"[BailianAPI] 获取到任务ID: {task_id}, 状态: {task_status}")
-                    
-                    # 如果任务是PENDING状态，开始轮询
-                    if task_status == "PENDING":
-                        response_data = _poll_task_result(task_id, api_key, poll_interval, max_wait_time)
-                        response_data_list.append(response_data)
-                else:
-                    # 同步模式
-                    response_data_list.append(response_data)
+            # 异步并行处理所有人物图像
+            response_data_list = asyncio.run(self._async_process_all_persons(
+                person_images, top_garment_image, bottom_garment_image, model, 
+                parameters, endpoint, headers, async_mode, enable_refiner, 
+                gender, api_key, poll_interval, max_wait_time
+            ))
                 
             return (json.dumps(response_data_list, ensure_ascii=False),)
             
