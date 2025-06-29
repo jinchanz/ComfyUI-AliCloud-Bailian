@@ -882,8 +882,12 @@ class VirtualTryOn:
     
     def run(self, top_garment_image, bottom_garment_image, person_images, api_key, endpoint, model, parameters, async_mode=True, enable_refiner=False, gender="male", poll_interval=3, max_wait_time=300):
         try:
-            if (not top_garment_image) or (not person_images):
-                raise ValueError("top_garment_image, bottom_garment_image, person_images 不能为空")
+            if not person_images or len(person_images) == 0:
+                raise ValueError("person_images 不能为空")
+            
+            if (not top_garment_image) and (not bottom_garment_image):
+                raise ValueError("top_garment_image 和 bottom_garment_image 不能同时为空")
+
             # 构建请求数据
             person_images = json.loads(person_images)
 
