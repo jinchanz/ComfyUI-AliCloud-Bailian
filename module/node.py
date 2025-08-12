@@ -880,6 +880,82 @@ class VirtualTryOn:
             logger.info(f"[VirtualTryOn] 并行处理完成，成功处理 {len([r for r in processed_results if 'error' not in r])} 个，失败 {len([r for r in processed_results if 'error' in r])} 个")
             return processed_results
     
+    def _sync_process_all_persons(self, person_images, top_garment_image, bottom_garment_image, model, parameters, endpoint, headers, async_mode, enable_refiner, gender, api_key, poll_interval, max_wait_time):
+        """同步处理所有人物图像"""
+        logger.info(f"[VirtualTryOn] 开始同步处理 {len(person_images)} 个人物图像")
+        processed_results = []
+        
+        for i, person_image in enumerate(person_images):
+            try:
+                logger.info(f"[VirtualTryOn] 处理第 {i+1}/{len(person_images)} 个人物图像")
+                
+                # 构建请求数据
+                input_data = {
+                    "top_garment_url": top_garment_image,
+                    "bottom_garment_url": bottom_garment_image if bottom_garment_image is not None and bottom_garment_image.strip() != "" else "",
+                    "person_image_url": person_image,
+                }
+                
+                request_data = {
+                    "model": model,
+                    "input": input_data,
+                }
+                
+                if parameters is not None and parameters.strip() != "":
+                    request_data["parameters"] = parameters if isinstance(parameters, dict) else json.loads(parameters)
+                else:
+                    request_data["parameters"] = {}
+                
+                logger.info(f"[VirtualTryOn] 发送请求到: {endpoint}, 请求数据: {request_data}")
+                
+                # 发送请求
+                response = requests.post(endpoint, headers=headers, json=request_data, timeout=300)
+                if response.status_code != 200:
+                    response_text = response.text
+                    raise ValueError(f"API 请求失败: {response.status_code} {response_text}")
+                
+                response_data = response.json()
+                logger.info(f"[VirtualTryOn] 请求成功: {response_data}")
+                
+                # 如果是异步模式且有task_id，需要轮询结果
+                if async_mode and "output" in response_data and "task_id" in response_data["output"]:
+                    task_id = response_data["output"]["task_id"]
+                    task_status = response_data["output"].get("task_status", "")
+                    
+                    logger.info(f"[VirtualTryOn] 获取到任务ID: {task_id}, 状态: {task_status}")
+                    
+                    # 如果任务是PENDING状态，开始轮询
+                    if task_status == "PENDING":
+                        response_data = _poll_task_result(task_id, api_key, poll_interval, max_wait_time)
+                        if enable_refiner:
+                            try:
+                                response_data = create_and_poll_refiner_task(endpoint, gender, input_data, response_data["output"]["image_url"], api_key, poll_interval, max_wait_time)
+                            except Exception as e:
+                                error_msg = f"处理refiner任务失败: {str(e)}"
+                                logger.info(f"[VirtualTryOn] {error_msg}")
+                        
+                        processed_results.append(response_data)
+                    else:
+                        processed_results.append(response_data)
+                else:
+                    # 同步模式
+                    if enable_refiner:
+                        try:
+                            response_data = create_and_poll_refiner_task(endpoint, gender, input_data, response_data["output"]["image_url"], api_key, poll_interval, max_wait_time)
+                        except Exception as e:
+                            error_msg = f"处理refiner任务失败: {str(e)}"
+                            logger.info(f"[VirtualTryOn] {error_msg}")
+                    
+                    processed_results.append(response_data)
+                    
+            except Exception as e:
+                error_msg = f"处理第 {i+1} 个人物图像失败: {str(e)}"
+                logger.info(f"[VirtualTryOn] {error_msg}")
+                processed_results.append({"error": error_msg, "person_image": person_image})
+        
+        logger.info(f"[VirtualTryOn] 同步处理完成，成功处理 {len([r for r in processed_results if 'error' not in r])} 个，失败 {len([r for r in processed_results if 'error' in r])} 个")
+        return processed_results
+    
     def run(self, top_garment_image, bottom_garment_image, person_images, api_key, endpoint, model, parameters, async_mode=True, enable_refiner=False, gender="male", poll_interval=3, max_wait_time=300):
         try:
             if not person_images or len(person_images) == 0:
@@ -904,28 +980,41 @@ class VirtualTryOn:
             if async_mode:
                 headers["X-DashScope-Async"] = "enable"
 
-            # 异步并行处理所有人物图像
-            response_data_list = asyncio.run(self._async_process_all_persons(
-                person_images, top_garment_image, bottom_garment_image, model, 
-                parameters, endpoint, headers, async_mode, enable_refiner, 
-                gender, api_key, poll_interval, max_wait_time
-            ))
+            # 检查是否已经在事件循环中运行
+            try:
+                # 尝试获取当前事件循环
+                loop = asyncio.get_running_loop()
+                # 如果已经在事件循环中，使用同步方式处理
+                logger.info(f"[VirtualTryOn] 检测到运行中的事件循环，使用同步处理方式")
+                response_data_list = self._sync_process_all_persons(
+                    person_images, top_garment_image, bottom_garment_image, model, 
+                    parameters, endpoint, headers, async_mode, enable_refiner, 
+                    gender, api_key, poll_interval, max_wait_time
+                )
+            except RuntimeError:
+                # 没有运行中的事件循环，可以使用 asyncio.run()
+                logger.info(f"[VirtualTryOn] 使用异步处理方式")
+                response_data_list = asyncio.run(self._async_process_all_persons(
+                    person_images, top_garment_image, bottom_garment_image, model, 
+                    parameters, endpoint, headers, async_mode, enable_refiner, 
+                    gender, api_key, poll_interval, max_wait_time
+                ))
                 
             return (json.dumps(response_data_list, ensure_ascii=False),)
             
         except requests.exceptions.RequestException as e:
             error_msg = f"API 请求失败: {str(e)}"
-            logger.info(f"[BailianAPI] {error_msg}")
+            logger.info(f"[VirtualTryOn] {error_msg}")
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
             
         except json.JSONDecodeError as e:
             error_msg = f"JSON 解析失败: {str(e)}"
-            logger.info(f"[BailianAPI] {error_msg}")
+            logger.info(f"[VirtualTryOn] {error_msg}")
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
             
         except Exception as e:
             error_msg = f"未知错误: {str(e)}"
-            logger.info(f"[BailianAPI] {error_msg}")
+            logger.info(f"[VirtualTryOn] {error_msg}")
             return (json.dumps({"error": error_msg}, ensure_ascii=False),)
     
 
