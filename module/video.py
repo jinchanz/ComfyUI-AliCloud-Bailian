@@ -559,7 +559,9 @@ class UnifyVideoGeneration:
                 # --- 视频参数 ---
                 "ratio": (["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "21:9"], {"default": "16:9"}),
                 "resolution": (["1080p", "720p", "480p"], {"default": "1080p"}),
-                "duration": ("INT", {"default": 5, "min": 2, "max": 15, "step": 1}),
+                # 上限取各模型中最宽松的一档（万相 3.0 支持 30 秒），
+                # 具体能不能用由中台校验；写得太紧会在节点层就拦掉合法参数
+                "duration": ("INT", {"default": 5, "min": 2, "max": 30, "step": 1}),
                 "seed": ("STRING", {"default": "", "placeholder": "随机种子，留空为随机"}),
                 "watermark": ("BOOLEAN", {"default": False}),
                 # --- 音频参数 ---
