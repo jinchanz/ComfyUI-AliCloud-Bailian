@@ -25,6 +25,10 @@ import torch
 from PIL import Image
 
 from .logging import logger
+from .model_registry import registry, CHANNEL_UNIFY, CHANNEL_DASHSCOPE
+
+# HappyHorse 直连百炼时的模型源键（与中台通道的清单完全独立）
+HAPPYHORSE_SOURCE = "happyhorse"
 
 
 class HappyHorseVideoGeneration:
@@ -35,33 +39,21 @@ class HappyHorseVideoGeneration:
     - 有首帧图片输入 → 图生视频 (I2V)
     - 有参考图片输入（无视频） → 参考生视频 (R2V)
     - 有视频输入 → 视频编辑 (Video Edit)
-    """
 
-    # 模型版本与模式的映射关系
-    MODEL_MAP = {
-        "1.1": {
-            "t2v": "happyhorse-1.1-t2v",
-            "i2v": "happyhorse-1.1-i2v",
-            "r2v": "happyhorse-1.1-r2v",
-            "video_edit": "happyhorse-1.0-video-edit",  # 视频编辑仅1.0
-        },
-        "1.0": {
-            "t2v": "happyhorse-1.0-t2v",
-            "i2v": "happyhorse-1.0-i2v",
-            "r2v": "happyhorse-1.0-r2v",
-            "video_edit": "happyhorse-1.0-video-edit",
-        },
-    }
+    模型清单来自 model_registry 的 dashscope 直连通道，与中台节点互不影响。
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
+        # 清单异常时也要保证下拉非空，否则节点在前端会直接报错
+        versions = registry.versions(CHANNEL_DASHSCOPE, HAPPYHORSE_SOURCE) or ["1.1", "1.0"]
         return {
             "required": {
                 "prompt": ("STRING", {
                     "default": "一座由硬纸板和瓶盖搭建的微型城市，在夜晚焕发出生机。",
                     "multiline": True
                 }),
-                "version": (["1.1", "1.0"], {"default": "1.1"}),
+                "version": (versions, {"default": registry.default_version(CHANNEL_DASHSCOPE, HAPPYHORSE_SOURCE)}),
             },
             "optional": {
                 # --- 首帧图片 (I2V 模式) ---
@@ -217,15 +209,8 @@ class HappyHorseVideoGeneration:
             return "t2v", "文生视频"
 
     def _resolve_model(self, version, mode):
-        """根据版本和模式自动匹配正确的模型名称"""
-        version_map = self.MODEL_MAP.get(version)
-        if not version_map:
-            raise ValueError(f"不支持的模型版本: {version}，可选: 1.1, 1.0")
-
-        model = version_map.get(mode)
-        if not model:
-            raise ValueError(f"版本 {version} 不支持模式: {mode}")
-
+        """根据版本和模式自动匹配正确的模型名称（直连百炼通道的清单）"""
+        model = registry.resolve(CHANNEL_DASHSCOPE, HAPPYHORSE_SOURCE, version, mode)
         logger.info(f"[HappyHorse] 自动匹配模型: 版本={version}, 模式={mode} → {model}")
         return model
 
@@ -530,60 +515,37 @@ class HappyHorseVideoGeneration:
 class UnifyVideoGeneration:
     """中台统一视频生成节点
 
-    支持多个视频生成服务的统一调用：
-    - Kling（可灵）: v1 / v1.5 / v2 / v3
-    - MiniMax（海螺）: Hailuo-2.3
-    - Wan（万相）: wan2.7 系列
-    - Seedance: seedance-1-0 / 2-0
+    支持多个视频生成服务的统一调用。model_source 必须为中台 modelSource 枚举值
+    （seedream / dashscope / minimax / idealab / kling）；万相、HappyHorse 等百炼系模型
+    在中台侧都归在 dashscope 下，用带前缀的版本名区分（如 wan-2.7 / happyhorse-1.1）。
 
-    自动根据输入判断生成模式 (T2V/I2V/R2V/V2V)，自动匹配正确的模型名称。
+    自动根据输入判断生成模式 (T2V/I2V/R2V/VIDEOEDIT)，自动匹配正确的模型名称。
     用户只需选择模型源和版本，无需手动指定模式和模型名。
+
+    本节点只读 model_registry 的 unify 通道，与直连百炼的 HappyHorse / 万相节点
+    使用两套完全独立的清单（两边模型名可能不同）。
+    三种方式新增模型都不需要改节点代码：
+    1. 把 refresh_models 打开，从中台 /form 接口同步模型清单；
+    2. 在插件目录的 video_models.json 的 unify 节里补一条（保存后刷新前端即生效）；
+    3. 直接在 version 里填完整 modelName，按直通模式提交。
     """
 
     DEFAULT_BASE_URL = "/api/video/unify"
 
-    # 模型源 + 版本 + 模式 → 模型名称 自动匹配表
-    # 对于 kling/minimax/seedance，所有模式使用同一个模型名
-    # 对于 wan，不同模式对应不同的模型名
-    MODEL_MAP = {
-        "kling": {
-            "kling-v3":   {"T2V": "kling-v3", "I2V": "kling-v3", "R2V": "kling-v3"},
-            "kling-v3-omni":   {"T2V": "kling-v3-omni", "I2V": "kling-v3-omni", "R2V": "kling-v3-omni"},
-            "kling-3.0-turbo": {"T2V": "kling-3.0-turbo", "I2V": "kling-3.0-turbo", "R2V": "kling-3.0-turbo"},
-            "kling-v2-5-turbo":   {"T2V": "kling-v2-5-turbo", "I2V": "kling-v2-5-turbo", "R2V": "kling-v2-5-turbo"},
-        },
-        "minimax": {
-            "2.3": {"T2V": "MiniMax-Hailuo-2.3", "I2V": "MiniMax-Hailuo-2.3", "R2V": "MiniMax-Hailuo-2.3", "V2V": "MiniMax-Hailuo-2.3"},
-        },
-        "wan": {
-            "2.7": {"T2V": "wan2.7-t2v", "I2V": "wan2.7-i2v", "R2V": "wan2.7-r2v", "V2V": "wan2.7-videoedit"},
-        },
-        "seedream": {
-            "2.0": {"T2V": "doubao-seedance-2-0-260128", "I2V": "doubao-seedance-2-0-260128", "R2V": "doubao-seedance-2-0-260128", "V2V": "doubao-seedance-2-0-260128"},
-            "mini": {"T2V": "doubao-seedance-2-0-mini-260615", "I2V": "doubao-seedance-2-0-mini-260615", "R2V": "doubao-seedance-2-0-mini-260615", "V2V": "doubao-seedance-2-0-mini-260615"},
-        },
-    }
-
-    # 各模型源的默认版本
-    DEFAULT_VERSIONS = {
-        "kling": "v3",
-        "minimax": "2.3",
-        "wan": "2.7",
-        "seedream": "2.0",
-    }
-
     @classmethod
     def INPUT_TYPES(cls):
+        sources = registry.sources(CHANNEL_UNIFY)
+        default_source = sources[0] if sources else "kling"
         return {
             "required": {
                 "prompt": ("STRING", {
                     "default": "一只可爱的小猫在草地上奔跑",
                     "multiline": True
                 }),
-                "model_source": (["kling", "minimax", "wan", "seedream"],),
+                "model_source": (sources,),
                 "version": ("STRING", {
-                    "default": "kling-v3",
-                    "placeholder": "版本: kling(v1/v1.5/v2/v3) wan(2.7) minimax(2.3) seedream(1.0/2.0)"
+                    "default": registry.default_version(CHANNEL_UNIFY, default_source),
+                    "placeholder": "版本或完整 modelName，如 wan-2.7 / happyhorse-1.1；清单外的值按直通模式提交"
                 }),
                 "base_url": ("STRING", {
                     "default": "",
@@ -606,14 +568,14 @@ class UnifyVideoGeneration:
                 # --- Kling 专用参数 ---
                 "mode": (["std", "pro"], {"default": "std"}),
                 "cfg_scale": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.1}),
-                # --- 媒体输入 (I2V/R2V/V2V) ---
+                # --- 媒体输入 (I2V/R2V/VIDEOEDIT) ---
                 "first_frame": ("IMAGE",),
                 "first_frame_url": ("STRING", {"default": "", "placeholder": "首帧图片URL"}),
                 "last_frame": ("IMAGE",),
                 "last_frame_url": ("STRING", {"default": "", "placeholder": "尾帧图片URL"}),
                 "ref_images": ("IMAGE",),
                 "ref_image_urls": ("STRING", {"default": "", "multiline": True, "placeholder": "参考图片URL，多个换行分隔"}),
-                "video_url": ("STRING", {"default": "", "placeholder": "视频URL (V2V模式)"}),
+                "video_url": ("STRING", {"default": "", "placeholder": "视频URL (视频编辑模式)"}),
                 "audio_url": ("STRING", {"default": "", "placeholder": "驱动音频URL"}),
                 # --- 多镜头 ---
                 "multi_shot": ("BOOLEAN", {"default": False}),
@@ -626,6 +588,8 @@ class UnifyVideoGeneration:
                 "biz_id": ("STRING", {"default": "", "placeholder": "业务ID（幂等）"}),
                 "timeout": ("INT", {"default": 600, "min": 60, "max": 1800, "step": 60}),
                 "poll_interval": ("INT", {"default": 8, "min": 3, "max": 60, "step": 1}),
+                # 从中台 /form 接口同步最新模型清单（写入本地缓存，后续运行复用）
+                "refresh_models": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -646,12 +610,32 @@ class UnifyVideoGeneration:
                  video_url="", audio_url="",
                  multi_shot=False, shot_type="intelligence", multi_prompt_json="",
                  token="", source="", operator="", biz_id="",
-                 timeout=600, poll_interval=8):
+                 timeout=600, poll_interval=8, refresh_models=False):
         try:
+            api_base = base_url.strip() if base_url and base_url.strip() else self.DEFAULT_BASE_URL
+
+            # 请求头（同时用于 /form 同步）
+            headers = {
+                "Content-Type": "application/json",
+            }
+            if token and token.strip():
+                headers["Authorization"] = f"Bearer {token.strip()}"
+
+            # 旧工作流的 widgets_values 尾部可能有冗余项，导致这个后加的开关
+            # 拿到非布尔值；只有明确为 True 时才去同步，避免意外触发
+            if refresh_models is True:
+                registry.refresh_from_remote(api_base, headers=headers, force=True)
+
             # 自动检测生成模式
             generate_type = self._detect_generate_type(
                 first_frame, first_frame_url, last_frame, last_frame_url,
                 ref_images, ref_image_urls, video_url
+            )
+
+            # 提前校验媒体 URL，避免提交后才被上游拒绝
+            self._validate_media_urls(
+                first_frame_url=first_frame_url, last_frame_url=last_frame_url,
+                ref_image_urls=ref_image_urls, video_url=video_url, audio_url=audio_url
             )
 
             # 自动匹配模型名称
@@ -674,21 +658,14 @@ class UnifyVideoGeneration:
                 video_url=video_url, audio_url=audio_url,
                 multi_shot=multi_shot, shot_type=shot_type,
                 multi_prompt_json=multi_prompt_json,
-                source=source, operator=operator, biz_id=biz_id
+                source=source, operator=operator, biz_id=biz_id,
+                version=version
             )
-
-            # 构建请求头
-            headers = {
-                "Content-Type": "application/json",
-            }
-            if token and token.strip():
-                headers["Authorization"] = f"Bearer {token.strip()}"
 
             logger.info(f"[UnifyVideo] 提交任务 | {model_source}/{model_name} | 模式: {generate_type}")
             logger.info(f"[UnifyVideo] 请求体: {self._safe_body_for_log(request_body)}")
 
             # 步骤1: 提交任务
-            api_base = base_url.strip() if base_url and base_url.strip() else self.DEFAULT_BASE_URL
             generate_url = f"{api_base}/generate"
             response = requests.post(generate_url, headers=headers, json=request_body, timeout=30)
 
@@ -705,9 +682,12 @@ class UnifyVideoGeneration:
 
             logger.info(f"[UnifyVideo] 任务已提交, taskId: {task_id}")
 
-            # 步骤2: 轮询查询结果
+            # 步骤2: 轮询查询结果（查询的 modelSource 必须与提交时一致，同样要用真实枚举值）
             self._api_base = api_base
-            video_result = self._poll_task_result(task_id, model_source, headers, timeout, poll_interval)
+            video_result = self._poll_task_result(
+                task_id, registry.request_source(CHANNEL_UNIFY, model_source),
+                headers, timeout, poll_interval
+            )
 
             # 提取结果
             status = video_result.get("status", "")
@@ -749,6 +729,35 @@ class UnifyVideoGeneration:
     # 模式检测与模型匹配
     # ----------------------------------------------------------------
 
+    def _validate_media_urls(self, first_frame_url, last_frame_url,
+                             ref_image_urls, video_url, audio_url):
+        """提交前校验媒体 URL 合法性，提前给出清晰报错"""
+        checks = [
+            ("首帧图片URL", first_frame_url, False),
+            ("尾帧图片URL", last_frame_url, False),
+            ("视频URL", video_url, True),   # 视频不支持 base64，必须公网URL
+            ("音频URL", audio_url, True),   # 音频同样要求公网URL
+        ]
+        for label, url, url_only in checks:
+            if not url or not url.strip():
+                continue
+            u = url.strip()
+            if u.startswith("data:"):
+                if url_only:
+                    raise ValueError(f"{label} 不支持 base64 数据，请提供公网可访问的 http(s) 链接")
+                continue
+            if not (u.startswith("http://") or u.startswith("https://")):
+                raise ValueError(f"{label} 不合法: '{u[:100]}'，必须以 http:// 或 https:// 开头的公网地址")
+            if any(c in u for c in (" ", "\n", "\t")):
+                raise ValueError(f"{label} 包含空格或换行符: '{u[:100]}'，请检查后重试")
+
+        # 参考图 URL 列表逐个校验
+        for u in self._parse_urls(ref_image_urls):
+            if u.startswith("data:"):
+                continue
+            if not (u.startswith("http://") or u.startswith("https://")):
+                raise ValueError(f"参考图片URL 不合法: '{u[:100]}'，必须以 http:// 或 https:// 开头")
+
     def _detect_generate_type(self, first_frame, first_frame_url,
                               last_frame, last_frame_url,
                               ref_images, ref_image_urls, video_url):
@@ -758,9 +767,9 @@ class UnifyVideoGeneration:
         has_last_frame = (last_frame is not None) or bool(last_frame_url and last_frame_url.strip())
         has_ref_images = (ref_images is not None) or bool(ref_image_urls and ref_image_urls.strip())
 
-        # 优先级: V2V > I2V > R2V > T2V
+        # 优先级: VIDEOEDIT > I2V > R2V > T2V
         if has_video:
-            return "V2V"
+            return "VIDEOEDIT"
         elif has_first_frame or has_last_frame:
             return "I2V"
         elif has_ref_images:
@@ -769,26 +778,8 @@ class UnifyVideoGeneration:
             return "T2V"
 
     def _resolve_model_name(self, model_source, version, generate_type):
-        """根据模型源、版本和模式自动匹配模型名称"""
-        source_map = self.MODEL_MAP.get(model_source)
-        if not source_map:
-            raise ValueError(f"不支持的模型源: {model_source}，可选: kling, minimax, wan, seedance")
-
-        # 如果版本为空，使用默认版本
-        if not version or not version.strip():
-            version = self.DEFAULT_VERSIONS.get(model_source, "")
-
-        version = version.strip()
-        version_map = source_map.get(version)
-        if not version_map:
-            available = list(source_map.keys())
-            raise ValueError(f"{model_source} 不支持版本 '{version}'，可选: {available}")
-
-        model_name = version_map.get(generate_type)
-        if not model_name:
-            raise ValueError(f"{model_source}/{version} 不支持模式: {generate_type}")
-
-        return model_name
+        """根据模型源、版本和模式自动匹配模型名称（中台通道的清单）"""
+        return registry.resolve(CHANNEL_UNIFY, model_source, version, generate_type)
 
     # ----------------------------------------------------------------
     # 构建请求
@@ -800,10 +791,24 @@ class UnifyVideoGeneration:
                             mode, cfg_scale, first_frame, first_frame_url,
                             last_frame, last_frame_url, ref_images, ref_image_urls,
                             video_url, audio_url, multi_shot, shot_type,
-                            multi_prompt_json, source, operator, biz_id):
+                            multi_prompt_json, source, operator, biz_id, version=""):
         """构建统一请求体"""
+        # 遗留模型源别名（如旧工作流里的 wan / happyhorse）换成中台真实枚举值
+        request_source = registry.request_source(CHANNEL_UNIFY, model_source)
+        if request_source != model_source:
+            logger.info(f"[UnifyVideo] 模型源 '{model_source}' 为兼容别名，"
+                        f"实际下发 modelSource={request_source}")
+
+        # /form 的 fields 是「前端表单字段 id」，不等于请求体字段名
+        # （例如表单里是 medias / watermark，请求体却是 mediaList / waterMark），
+        # 因此这里只用它做诊断提示，不用它过滤字段，避免吞掉模型其实支持的参数。
+        def warn_if_unlisted(field, body_field):
+            if not registry.supports_field(CHANNEL_UNIFY, model_name, field):
+                logger.info(f"[UnifyVideo] 提示: {model_name} 的表单未列出 '{field}'，"
+                            f"仍按原有行为下发 {body_field}，若上游报参数错可去掉该输入")
+
         body = {
-            "modelSource": model_source,
+            "modelSource": request_source,
             "modelName": model_name,
             "generateType": generate_type,
             "prompt": prompt,
@@ -815,9 +820,10 @@ class UnifyVideoGeneration:
         }
 
         # ratio 仅在 T2V / R2V 模式下传递；
-        # I2V(跟随首帧图) 和 V2V(跟随源视频) 的输出宽高比由输入决定，不传 ratio
+        # I2V(跟随首帧图) 和 VIDEOEDIT(跟随源视频) 的输出宽高比由输入决定，不传 ratio
         if generate_type in ("T2V", "R2V"):
             body["ratio"] = ratio
+            warn_if_unlisted("ratio", "ratio")
 
         # 可选字段
         if negative_prompt and negative_prompt.strip():
@@ -831,19 +837,21 @@ class UnifyVideoGeneration:
         if biz_id and biz_id.strip():
             body["bizId"] = biz_id.strip()
 
-        # Kling 专用参数
-        if model_source == "kling":
+        # 供应商专属参数：以内置声明为主（保持既有行为），/form 只用于「补充」
+        # 声明里漏掉的字段（例如快乐马视频编辑其实接受 audioSetting），绝不做删减
+        extras = registry.extras(CHANNEL_UNIFY, model_source, version, model_name)
+        if "mode" in extras:
             body["mode"] = mode
+        if "cfgScale" in extras:
             body["cfgScale"] = str(cfg_scale)
-
-        # Wan 专用参数
-        if model_source == "wan":
+        if "audioSetting" in extras:
             body["audioSetting"] = audio_setting
 
         # 多镜头
         if multi_shot:
             body["multiShot"] = True
             body["shotType"] = shot_type
+            warn_if_unlisted("multiShot", "multiShot")
             if multi_prompt_json and multi_prompt_json.strip():
                 try:
                     body["multiPromptList"] = json.loads(multi_prompt_json.strip())
@@ -896,7 +904,7 @@ class UnifyVideoGeneration:
             for url in self._parse_urls(ref_image_urls):
                 media_list.append({"content": url, "role": "referenceImage"})
 
-        # 视频 (V2V模式)
+        # 视频 (视频编辑模式)
         if video_url and video_url.strip():
             media_list.append({"content": video_url.strip(), "role": "targetVideo"})
 
