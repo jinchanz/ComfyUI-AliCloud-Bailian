@@ -65,7 +65,9 @@ class WanVideoGeneration(DashScopeVideoMixin):
                 # --- 生成参数 ---
                 "resolution": (["1080P", "720P"], {"default": "1080P"}),
                 "ratio": (["16:9", "9:16", "1:1", "4:3", "3:4"], {"default": "16:9"}),
-                "duration": ("INT", {"default": 5, "min": 2, "max": 15, "step": 1}),
+                # 各模型可用时长不同（2.7 为 2~15，3.0 为 2~30），
+                # 这里取最宽松的上限，实际可用范围由百炼校验
+                "duration": ("INT", {"default": 5, "min": 2, "max": 30, "step": 1}),
                 "prompt_extend": ("BOOLEAN", {"default": True}),
                 "watermark": ("BOOLEAN", {"default": False}),
                 "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
@@ -74,7 +76,7 @@ class WanVideoGeneration(DashScopeVideoMixin):
                 "api_key": ("STRING", {"default": "", "placeholder": "百炼 API Key (sk-xxx)"}),
                 "workspace_id": ("STRING", {"default": "", "placeholder": "业务空间ID，留空使用公共域名"}),
                 "region": (["cn-beijing", "ap-southeast-1"], {"default": "cn-beijing"}),
-                "timeout": ("INT", {"default": 900, "min": 60, "max": 1800, "step": 60}),
+                "timeout": ("INT", {"default": 900, "min": 60, "max": 36000, "step": 60}),
                 "poll_interval": ("INT", {"default": 15, "min": 5, "max": 60, "step": 5}),
             }
         }

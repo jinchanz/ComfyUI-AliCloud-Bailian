@@ -79,7 +79,7 @@ class HappyHorseVideoGeneration:
                 "api_key": ("STRING", {"default": "", "placeholder": "百炼 API Key (sk-xxx)"}),
                 "workspace_id": ("STRING", {"default": "", "placeholder": "业务空间ID，留空使用默认域名"}),
                 "region": (["cn-beijing", "ap-southeast-1", "us", "eu-central-1"], {"default": "cn-beijing"}),
-                "timeout": ("INT", {"default": 600, "min": 60, "max": 1800, "step": 60}),
+                "timeout": ("INT", {"default": 600, "min": 60, "max": 36000, "step": 60}),
                 "poll_interval": ("INT", {"default": 15, "min": 5, "max": 60, "step": 5}),
             }
         }
@@ -588,7 +588,7 @@ class UnifyVideoGeneration:
                 "source": ("STRING", {"default": "", "placeholder": "业务方来源标识"}),
                 "operator": ("STRING", {"default": "", "placeholder": "操作者ID"}),
                 "biz_id": ("STRING", {"default": "", "placeholder": "业务ID（幂等）"}),
-                "timeout": ("INT", {"default": 600, "min": 60, "max": 1800, "step": 60}),
+                "timeout": ("INT", {"default": 600, "min": 60, "max": 36000, "step": 60}),
                 "poll_interval": ("INT", {"default": 8, "min": 3, "max": 60, "step": 1}),
                 # 从中台 /form 接口同步最新模型清单（写入本地缓存，后续运行复用）
                 "refresh_models": ("BOOLEAN", {"default": False}),
@@ -908,11 +908,11 @@ class UnifyVideoGeneration:
 
         # 视频 (视频编辑模式)
         if video_url and video_url.strip():
-            media_list.append({"content": video_url.strip(), "role": "targetVideo"})
+            media_list.append({"content": video_url.strip(), "role": "referenceVideo"})
 
         # 参考音频
         if audio_url and audio_url.strip():
-            media_list.append({"content": audio_url.strip(), "role": "referenceVoice"})
+            media_list.append({"content": audio_url.strip(), "role": "referenceAudio"})
 
         return media_list
 
