@@ -86,6 +86,7 @@ UNIFY_VERSION_ALIASES = {
                 "VIDEOEDIT": "wan2.7-videoedit",
             },
             "wan-3.0": "wan3.0-video",
+            "wan-3.0-prime": "wan3.0-video-prime",
             "happyhorse-1.0": {
                 "T2V": "happyhorse-1.0-t2v",
                 "I2V": "happyhorse-1.0-i2v",
@@ -203,8 +204,9 @@ DASHSCOPE_MODELS = {
             },
         },
     },
-    # 万相：T2V 与 I2V 是两个不同模型，首尾帧与视频续写都由 i2v 模型承担
-    # （靠 input.media 的素材组合区分），不支持 R2V
+    # 万相：2.7 的 T2V 与 I2V 是两个不同模型，首尾帧与视频续写都由 i2v 模型承担
+    # （靠 input.media 的素材组合区分），不支持 R2V；
+    # 3.0 起改为单一全能模型，四模态共用同一个模型名，故用字符串写法让所有模式复用。
     "wan": {
         "default_version": "2.7",
         "versions": {
@@ -218,6 +220,10 @@ DASHSCOPE_MODELS = {
                 "I2V": "wan2.7-i2v-2026-04-25",
                 "VIDEOEDIT": "wan2.7-i2v-2026-04-25",
             },
+            # 3.0 标准版：全能参考，最长 30 秒
+            "3.0": "wan3.0-video",
+            # 3.0 高速版（Prime）：能力对齐标准版，端到端速度显著提升
+            "3.0-prime": "wan3.0-video-prime",
         },
     },
 }
