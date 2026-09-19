@@ -10,6 +10,7 @@ GET  /api/v1/tasks/{task_id}                                 轮询结果
 
 import base64
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +35,64 @@ REGION_HOSTS = {
     "eu-central-1": "https://dashscope.aliyuncs.com",
 }
 WORKSPACE_HOST_REGIONS = ("cn-beijing", "ap-southeast-1", "eu-central-1")
+
+
+def parse_custom_headers(custom_headers):
+    """解析节点里填的自定义请求头
+
+    支持两种写法：JSON 对象 {"X-Foo": "bar"}，或每行一条的 `Key: Value`。
+    解析失败只告警不抛错，避免因为一个附加头把整个生成流程堵死。
+    """
+    text = (custom_headers or "").strip()
+    if not text:
+        return {}
+
+    parsed = {}
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.warning(f"自定义请求头 JSON 解析失败，已忽略: {e}")
+            return {}
+        if not isinstance(data, dict):
+            logger.warning("自定义请求头必须是 JSON 对象，已忽略")
+            return {}
+        items = data.items()
+    else:
+        items = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" not in line:
+                logger.warning(f"自定义请求头缺少冒号，已忽略该行: {line[:80]}")
+                continue
+            key, value = line.split(":", 1)
+            items.append((key, value))
+
+    for key, value in items:
+        key = str(key).strip()
+        if not key:
+            continue
+        parsed[key] = str(value).strip() if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+    return parsed
+
+
+def merge_custom_headers(headers, custom_headers, log_prefix="DashScope"):
+    """把自定义请求头合并进内置请求头，同名以自定义为准（可覆盖 Authorization 等）"""
+    extra = parse_custom_headers(custom_headers)
+    if not extra:
+        return headers
+
+    overridden = [k for k in extra if k in headers]
+    if overridden:
+        logger.info(f"[{log_prefix}] 自定义请求头覆盖内置头: {', '.join(overridden)}")
+    logger.info(f"[{log_prefix}] 附加自定义请求头: {', '.join(extra.keys())}")
+
+    merged = dict(headers)
+    merged.update(extra)
+    return merged
 
 
 class DashScopeVideoMixin:
@@ -68,7 +127,7 @@ class DashScopeVideoMixin:
         """任务查询 URL"""
         return f"{self._host(workspace_id, region)}/api/v1/tasks/{task_id}"
 
-    def _submit_task(self, request_body, api_key, workspace_id, region):
+    def _submit_task(self, request_body, api_key, workspace_id, region, custom_headers=""):
         """创建异步任务，返回 task_id"""
         endpoint = self._build_endpoint(workspace_id, region)
         headers = {
@@ -77,6 +136,7 @@ class DashScopeVideoMixin:
             # 缺少此头会报 current user api does not support synchronous calls
             "X-DashScope-Async": "enable",
         }
+        headers = merge_custom_headers(headers, custom_headers, self.LOG_PREFIX)
 
         response = requests.post(endpoint, headers=headers, json=request_body, timeout=30)
         if response.status_code != 200:
@@ -88,16 +148,17 @@ class DashScopeVideoMixin:
 
         task_id = result.get("output", {}).get("task_id")
         if not task_id:
-            import json
             raise Exception(f"响应中未找到 task_id: {json.dumps(result, ensure_ascii=False)[:500]}")
 
         logger.info(f"[{self.LOG_PREFIX}] 任务已提交, task_id: {task_id}")
         return task_id
 
-    def _poll_task_result(self, task_id, api_key, workspace_id, region, timeout, poll_interval):
+    def _poll_task_result(self, task_id, api_key, workspace_id, region, timeout, poll_interval,
+                          custom_headers=""):
         """轮询任务结果，返回最终响应（SUCCEEDED / FAILED）"""
         task_url = self._build_task_url(task_id, workspace_id, region)
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = merge_custom_headers({"Authorization": f"Bearer {api_key}"},
+                                       custom_headers, self.LOG_PREFIX)
         start_time = time.time()
 
         while True:

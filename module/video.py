@@ -25,6 +25,7 @@ import torch
 from PIL import Image
 
 from .logging import logger
+from .dashscope_video import merge_custom_headers
 from .model_registry import registry, CHANNEL_UNIFY, CHANNEL_DASHSCOPE
 
 # HappyHorse 直连百炼时的模型源键（与中台通道的清单完全独立）
@@ -81,6 +82,11 @@ class HappyHorseVideoGeneration:
                 "region": (["cn-beijing", "ap-southeast-1", "us", "eu-central-1"], {"default": "cn-beijing"}),
                 "timeout": ("INT", {"default": 600, "min": 60, "max": 36000, "step": 60}),
                 "poll_interval": ("INT", {"default": 15, "min": 5, "max": 60, "step": 5}),
+                # 新增项放在最后，避免打乱旧工作流 widgets_values 的顺序
+                "custom_headers": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": '自定义请求头，JSON 对象 {"X-Foo":"bar"} 或每行 Key: Value；与内置头合并，同名覆盖'
+                }),
             }
         }
 
@@ -96,7 +102,7 @@ class HappyHorseVideoGeneration:
                  resolution="1080P", ratio="16:9", duration=5,
                  watermark=True, seed=-1, audio_setting="auto",
                  api_key="", workspace_id="", region="cn-beijing",
-                 timeout=600, poll_interval=15):
+                 timeout=600, poll_interval=15, custom_headers=""):
         try:
             # 获取 API Key
             api_key = self._resolve_api_key(api_key)
@@ -121,12 +127,12 @@ class HappyHorseVideoGeneration:
             # 构建请求 URL
             endpoint = self._build_endpoint(workspace_id, region)
 
-            # 构建请求头
-            headers = {
+            # 构建请求头（自定义头同名时覆盖内置值）
+            headers = merge_custom_headers({
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
                 "X-DashScope-Async": "enable"
-            }
+            }, custom_headers, "HappyHorse")
 
             logger.info(f"[HappyHorse] 开始视频生成 | 模式: {mode_desc} | 模型: {model}")
             logger.info(f"[HappyHorse] 分辨率: {resolution} | 比例: {ratio} | 时长: {duration}s")
@@ -149,7 +155,8 @@ class HappyHorseVideoGeneration:
             logger.info(f"[HappyHorse] 任务已提交, task_id: {task_id}")
 
             # 步骤2: 轮询获取结果
-            task_result = self._poll_task_result(task_id, api_key, workspace_id, region, timeout, poll_interval)
+            task_result = self._poll_task_result(task_id, api_key, workspace_id, region, timeout,
+                                                 poll_interval, custom_headers)
 
             # 处理结果
             output = task_result.get("output", {})
@@ -383,10 +390,12 @@ class HappyHorseVideoGeneration:
 
         return f"https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
 
-    def _poll_task_result(self, task_id, api_key, workspace_id, region, timeout, poll_interval):
+    def _poll_task_result(self, task_id, api_key, workspace_id, region, timeout, poll_interval,
+                          custom_headers=""):
         """轮询任务结果"""
         task_url = self._build_task_url(task_id, workspace_id, region)
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = merge_custom_headers({"Authorization": f"Bearer {api_key}"},
+                                       custom_headers, "HappyHorse")
 
         start_time = time.time()
 
@@ -592,6 +601,11 @@ class UnifyVideoGeneration:
                 "poll_interval": ("INT", {"default": 8, "min": 3, "max": 60, "step": 1}),
                 # 从中台 /form 接口同步最新模型清单（写入本地缓存，后续运行复用）
                 "refresh_models": ("BOOLEAN", {"default": False}),
+                # 新增项放在最后，避免打乱旧工作流 widgets_values 的顺序
+                "custom_headers": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": '自定义请求头，JSON 对象 {"X-Foo":"bar"} 或每行 Key: Value；与内置头合并，同名覆盖'
+                }),
             }
         }
 
@@ -612,7 +626,7 @@ class UnifyVideoGeneration:
                  video_url="", audio_url="",
                  multi_shot=False, shot_type="intelligence", multi_prompt_json="",
                  token="", source="", operator="", biz_id="",
-                 timeout=600, poll_interval=8, refresh_models=False):
+                 timeout=600, poll_interval=8, refresh_models=False, custom_headers=""):
         try:
             api_base = base_url.strip() if base_url and base_url.strip() else self.DEFAULT_BASE_URL
 
@@ -622,6 +636,8 @@ class UnifyVideoGeneration:
             }
             if token and token.strip():
                 headers["Authorization"] = f"Bearer {token.strip()}"
+            # 自定义头最后合并，同名时覆盖内置值（含 Authorization）
+            headers = merge_custom_headers(headers, custom_headers, "UnifyVideo")
 
             # 旧工作流的 widgets_values 尾部可能有冗余项，导致这个后加的开关
             # 拿到非布尔值；只有明确为 True 时才去同步，避免意外触发

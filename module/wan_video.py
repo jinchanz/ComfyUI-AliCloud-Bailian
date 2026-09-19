@@ -78,6 +78,11 @@ class WanVideoGeneration(DashScopeVideoMixin):
                 "region": (["cn-beijing", "ap-southeast-1"], {"default": "cn-beijing"}),
                 "timeout": ("INT", {"default": 900, "min": 60, "max": 36000, "step": 60}),
                 "poll_interval": ("INT", {"default": 15, "min": 5, "max": 60, "step": 5}),
+                # 新增项放在最后，避免打乱旧工作流 widgets_values 的顺序
+                "custom_headers": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": '自定义请求头，JSON 对象 {"X-Foo":"bar"} 或每行 Key: Value；与内置头合并，同名覆盖'
+                }),
             }
         }
 
@@ -94,7 +99,7 @@ class WanVideoGeneration(DashScopeVideoMixin):
                  resolution="1080P", ratio="16:9", duration=5,
                  prompt_extend=True, watermark=False, seed=-1,
                  model_override="", api_key="", workspace_id="",
-                 region="cn-beijing", timeout=900, poll_interval=15):
+                 region="cn-beijing", timeout=900, poll_interval=15, custom_headers=""):
         try:
             api_key = self._resolve_api_key(api_key)
 
@@ -126,11 +131,11 @@ class WanVideoGeneration(DashScopeVideoMixin):
             logger.info(f"[Wan] 请求体: {self._safe_body_for_log(request_body)}")
 
             # 步骤1: 创建任务
-            task_id = self._submit_task(request_body, api_key, workspace_id, region)
+            task_id = self._submit_task(request_body, api_key, workspace_id, region, custom_headers)
 
             # 步骤2: 轮询结果
             task_result = self._poll_task_result(
-                task_id, api_key, workspace_id, region, timeout, poll_interval
+                task_id, api_key, workspace_id, region, timeout, poll_interval, custom_headers
             )
 
             output = task_result.get("output", {})
