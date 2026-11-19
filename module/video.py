@@ -27,6 +27,15 @@ from PIL import Image
 from .logging import logger
 from .dashscope_video import merge_custom_headers
 from .model_registry import registry, CHANNEL_UNIFY, CHANNEL_DASHSCOPE
+from .unify_common import (
+    add_supplier_credential,
+    merge_custom_body,
+    redact_supplier_credential,
+    build_unify_headers,
+    parse_json_response,
+    resolve_unify_urls,
+    submit_unify_task,
+)
 
 # HappyHorse 直连百炼时的模型源键（与中台通道的清单完全独立）
 HAPPYHORSE_SOURCE = "happyhorse"
@@ -606,6 +615,14 @@ class UnifyVideoGeneration:
                     "default": "", "multiline": True,
                     "placeholder": '自定义请求头，JSON 对象 {"X-Foo":"bar"} 或每行 Key: Value；与内置头合并，同名覆盖'
                 }),
+                "supplier_credential": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": '可选供应商凭证 JSON，如 {"type":"BEARER","token":"..."}'
+                }),
+                "custom_body": ("STRING", {
+                    "default": "", "multiline": True,
+                    "placeholder": "可选请求体 JSON 对象；最后递归合并，同名覆盖，数组整体替换"
+                }),
             }
         }
 
@@ -626,18 +643,13 @@ class UnifyVideoGeneration:
                  video_url="", audio_url="",
                  multi_shot=False, shot_type="intelligence", multi_prompt_json="",
                  token="", source="", operator="", biz_id="",
-                 timeout=600, poll_interval=8, refresh_models=False, custom_headers=""):
+                 timeout=600, poll_interval=8, refresh_models=False, custom_headers="",
+                 supplier_credential="", custom_body=""):
         try:
-            api_base = base_url.strip() if base_url and base_url.strip() else self.DEFAULT_BASE_URL
+            api_base, generate_url, query_url = resolve_unify_urls(base_url, self.DEFAULT_BASE_URL)
 
             # 请求头（同时用于 /form 同步）
-            headers = {
-                "Content-Type": "application/json",
-            }
-            if token and token.strip():
-                headers["Authorization"] = f"Bearer {token.strip()}"
-            # 自定义头最后合并，同名时覆盖内置值（含 Authorization）
-            headers = merge_custom_headers(headers, custom_headers, "UnifyVideo")
+            headers = build_unify_headers(token, custom_headers, "UnifyVideo")
 
             # 旧工作流的 widgets_values 尾部可能有冗余项，导致这个后加的开关
             # 拿到非布尔值；只有明确为 True 时才去同步，避免意外触发
@@ -677,33 +689,23 @@ class UnifyVideoGeneration:
                 multi_shot=multi_shot, shot_type=shot_type,
                 multi_prompt_json=multi_prompt_json,
                 source=source, operator=operator, biz_id=biz_id,
-                version=version
+                version=version, supplier_credential=supplier_credential, custom_body=custom_body
             )
 
             logger.info(f"[UnifyVideo] 提交任务 | {model_source}/{model_name} | 模式: {generate_type}")
             logger.info(f"[UnifyVideo] 请求体: {self._safe_body_for_log(request_body)}")
 
             # 步骤1: 提交任务
-            generate_url = f"{api_base}/generate"
-            response = requests.post(generate_url, headers=headers, json=request_body, timeout=30)
-
-            if response.status_code != 200:
-                raise Exception(f"提交任务失败: HTTP {response.status_code} - {response.text}")
-
-            result = response.json()
-            if not result.get("success"):
-                raise Exception(f"提交任务失败: [{result.get('code')}] {result.get('message')}")
-
-            task_id = result.get("data")
-            if not task_id:
-                raise Exception(f"响应中未找到 taskId: {json.dumps(result, ensure_ascii=False)[:500]}")
+            logger.info(f"[UnifyVideo] 提交地址: {generate_url}")
+            task_id = submit_unify_task(generate_url, request_body, headers)
 
             logger.info(f"[UnifyVideo] 任务已提交, taskId: {task_id}")
 
             # 步骤2: 轮询查询结果（查询的 modelSource 必须与提交时一致，同样要用真实枚举值）
-            self._api_base = api_base
+            self._query_url = query_url
+            logger.info(f"[UnifyVideo] 查询地址: {query_url}")
             video_result = self._poll_task_result(
-                task_id, registry.request_source(CHANNEL_UNIFY, model_source),
+                task_id, request_body["modelSource"],
                 headers, timeout, poll_interval
             )
 
@@ -809,7 +811,8 @@ class UnifyVideoGeneration:
                             mode, cfg_scale, first_frame, first_frame_url,
                             last_frame, last_frame_url, ref_images, ref_image_urls,
                             video_url, audio_url, multi_shot, shot_type,
-                            multi_prompt_json, source, operator, biz_id, version=""):
+                            multi_prompt_json, source, operator, biz_id, version="",
+                            supplier_credential="", custom_body=""):
         """构建统一请求体"""
         # 遗留模型源别名（如旧工作流里的 wan / happyhorse）换成中台真实枚举值
         request_source = registry.request_source(CHANNEL_UNIFY, model_source)
@@ -886,7 +889,7 @@ class UnifyVideoGeneration:
         if media_list:
             body["mediaList"] = media_list
 
-        return body
+        return merge_custom_body(add_supplier_credential(body, supplier_credential), custom_body)
 
     def _build_media_list(self, first_frame, first_frame_url,
                           last_frame, last_frame_url,
@@ -935,7 +938,7 @@ class UnifyVideoGeneration:
     def _safe_body_for_log(self, body):
         """截断 base64 媒体内容，生成可读的日志字符串"""
         import copy
-        safe = copy.deepcopy(body)
+        safe = copy.deepcopy(redact_supplier_credential(body))
         medias = safe.get("mediaList")
         if isinstance(medias, list):
             for item in medias:
@@ -950,7 +953,7 @@ class UnifyVideoGeneration:
 
     def _poll_task_result(self, task_id, model_source, headers, timeout, poll_interval):
         """轮询任务结果"""
-        query_url = f"{self._api_base}/query"
+        query_url = self._query_url
         params = {"taskId": task_id, "modelSource": model_source}
 
         start_time = time.time()
@@ -966,7 +969,7 @@ class UnifyVideoGeneration:
                 response = requests.get(query_url, headers=headers, params=params, timeout=30)
                 response.raise_for_status()
 
-                result = response.json()
+                result = parse_json_response(response, "查询结果", query_url)
 
                 if not result.get("success"):
                     raise Exception(f"查询失败: [{result.get('code')}] {result.get('message')}")

@@ -10,3 +10,4 @@
 __pycache__/
 module/__pycache__/
 docs/local/
+video_models.json.example
